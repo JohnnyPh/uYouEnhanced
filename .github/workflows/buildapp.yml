@@ -214,7 +214,7 @@ jobs:
           echo "ipa_id=${IPA_ID}" >> "$GITHUB_OUTPUT"
 
           echo "Step 4: Editing IPA metadata..."
-          APP_NAME="YouTube v${YOUTUBE_VERSION} + uYou v${UYOU_VERSION} | Google LLC"
+          APP_NAME="YouTube v${YOUTUBE_VERSION} + uYouEnhanced v${UYOU_VERSION} | Google LLC"
           curl -sS -X POST https://api.dbservices.to/v1.7/edit_ipa_metadata/ \
             -F "lt=${APPDB_LINK_TOKEN}" \
             -F "id=${IPA_ID}" \
