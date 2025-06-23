@@ -40,7 +40,7 @@ on:
         type: boolean
       create_release:
         description: "Create a draft release"
-        default: true
+        default: false
         required: false
         type: boolean
       upload_to_appdb:
