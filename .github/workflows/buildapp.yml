@@ -1,6 +1,3 @@
-# Original idea by @ISnackable. Thanks to him for handling the hardest parts!
-# https://github.com/ISnackable/YTCubePlus/blob/main/.github/workflows/Build.yml
-
 name: Build and Release uYouEnhanced
 
 on:
@@ -18,7 +15,7 @@ on:
         type: string
       decrypted_youtube_url:
         description: "Direct URL of the decrypted YouTube IPA"
-        default: ""
+        default: "https://www.dropbox.com/scl/fi/49svm4r7eymn2nfxcggm1/com.google.ios.youtube_20.25.4_und3fined.ipa?rlkey=d8may76sn78wuazj55uj8e0nc&st=2hpnngd9&dl=1"
         required: true
         type: string
       bundle_id:
@@ -46,7 +43,17 @@ on:
         default: true
         required: false
         type: boolean
-  
+      upload_to_appdb:
+        description: "Upload and Edit Metadata on appdb"
+        default: true
+        required: false
+        type: boolean
+      cleanup_old_versions:
+        description: "Delete older versions of this app from appdb"
+        default: true
+        required: false
+        type: boolean
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -60,20 +67,20 @@ jobs:
 
     steps:
       - name: Checkout Main
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
         with:
           path: main
           ref: ${{ github.event.inputs.commit_id || github.ref }}
           submodules: recursive
 
       - name: Install Dependencies
-        run: brew install ldid dpkg make
+        run: brew install ldid dpkg make jq
 
       - name: Set PATH environment variable
         run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH 
 
       - name: Setup Theos
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
         with:
           repository: theos/theos
           ref: master
@@ -82,7 +89,7 @@ jobs:
       
       - name: SDK Caching
         id: SDK
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v4
         env:
           cache-name: iOS-${{ inputs.sdk_version }}-SDK
         with:
@@ -102,7 +109,7 @@ jobs:
           THEOS: ${{ github.workspace }}/theos
 
       - name: Setup Theos Jailed
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
         with:
           repository: qnblackcat/theos-jailed
           ref: master
@@ -115,11 +122,11 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Hash YT ipa url
+      - name: Mask YT ipa url
         run: |
           URL_YT="$(jq -r '.inputs.decrypted_youtube_url' $GITHUB_EVENT_PATH)"
           echo ::add-mask::$URL_YT
-          echo URL_YT=$URL_YT >> $GITHUB_ENV
+          echo "URL_YT=$URL_YT" >> $GITHUB_ENV
 
       - name: Prepare YouTube iPA
         id: prepare_youtube
@@ -132,7 +139,6 @@ jobs:
           echo "==> YouTube v$youtube_version downloaded!"
           sed -i '' "17s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
           echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
-
         env:
           THEOS: ${{ github.workspace }}/theos
           YOUTUBE_URL: ${{ env.URL_YT }}
@@ -141,14 +147,16 @@ jobs:
         id: build_package
         run: |
           cd ${{ github.workspace }}/main
-          sed -i '' "30s#.*#BUNDLE_ID = ${{ env.BUNDLE_ID }}#g" Makefile                          # Modify the bundle ID
-          sed -i '' "29s#.*#DISPLAY_NAME = ${{ env.APP_NAME }}#g" Makefile                        # Modify the app name
-          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile # Modify the SDK version
+          sed -i '' "30s#.*#BUNDLE_ID = ${{ env.BUNDLE_ID }}#g" Makefile
+          sed -i '' "29s#.*#DISPLAY_NAME = ${{ env.APP_NAME }}#g" Makefile
+          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
-          echo "package=$(ls -t packages | head -n1)" >>$GITHUB_OUTPUT
+          
+          PACKAGE_NAME=$(ls -t packages | head -n1)
+          echo "package_name=${PACKAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "job_id=$(echo -n "${{ github.run_id }}-${{ github.run_attempt }}" | shasum -a 1 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
           echo -e "==> \033[1mBundle ID: ${{ env.BUNDLE_ID }}\033[0m"
-
         env:
           THEOS: ${{ github.workspace }}/theos
           UYOU_VERSION: ${{ inputs.uyou_version }}
@@ -157,25 +165,107 @@ jobs:
 
       - name: Upload Artifact
         if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v4
+        with:
+          name: uYouEnhanced_${{ steps.prepare_youtube.outputs.youtube_version }}_${{ inputs.uyou_version }}
+          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package_name }}
+          if-no-files-found: error
+
+      - name: Upload and Edit on appdb
+        if: ${{ inputs.upload_to_appdb }}
+        id: upload_step
         env:
+          APPDB_LINK_TOKEN: ${{ secrets.APPDB_LINK_TOKEN }}
+          PACKAGE_PATH: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package_name }}
+          JOB_ID: ${{ steps.build_package.outputs.job_id }}
           UYOU_VERSION: ${{ inputs.uyou_version }}
           YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
-        with:
-          name: uYouEnhanced_${{ env.YOUTUBE_VERSION }}_${{ env.UYOU_VERSION }}
-          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
-          if-no-files-found: error
+        run: |
+          echo "Step 1: Uploading IPA to appdb..."
+          curl -sS -X POST https://api.dbservices.to/v1.7/add_ipa/ \
+               -F "lt=${APPDB_LINK_TOKEN}" \
+               -F "job_id=${JOB_ID}" \
+               -F "ipa=@${PACKAGE_PATH}" \
+               --fail
+
+          echo "Step 2: Waiting for IPA processing..."
+          for i in {1..20}; do
+            sleep 15
+            STATUS_RESPONSE=$(curl -sS -X POST https://api.dbservices.to/v1.7/get_ipa_analyze_jobs/ -F "lt=${APPDB_LINK_TOKEN}" -F "ids[]=${JOB_ID}")
+            IS_FINISHED=$(echo "$STATUS_RESPONSE" | jq -r '.data[0].is_finished')
+            if [ "$IS_FINISHED" = "1" ]; then
+              echo "Processing finished!"
+              break
+            fi
+            echo "Still processing... Attempt $i of 20."
+            if [ "$i" = "20" ]; then
+              echo "Error: Timeout waiting for IPA processing."
+              exit 1
+            fi
+          done
+          
+          echo "Step 3: Fetching the new IPA ID..."
+          IPA_ID=$(curl -sS -X POST https://api.dbservices.to/v1.7/get_ipas/ -F "lt=${APPDB_LINK_TOKEN}" | jq '(.data | sort_by(.id) | reverse)[0].id')
+          if [ -z "$IPA_ID" ] || [ "$IPA_ID" = "null" ]; then
+            echo "Error: Could not fetch new IPA ID."
+            exit 1
+          fi
+          echo "Found newest IPA ID: ${IPA_ID}"
+          echo "ipa_id=${IPA_ID}" >> "$GITHUB_OUTPUT"
+
+          echo "Step 4: Editing IPA metadata..."
+          APP_NAME="YouTube v${YOUTUBE_VERSION} + uYou v${UYOU_VERSION} | Google LLC"
+          curl -sS -X POST https://api.dbservices.to/v1.7/edit_ipa_metadata/ \
+            -F "lt=${APPDB_LINK_TOKEN}" \
+            -F "id=${IPA_ID}" \
+            -F "name=${APP_NAME}" \
+            -F "use_default_tos=1" \
+            -F "use_default_privacy_policy=1" \
+            -F "use_default_license=1" \
+            -F "is_18plus=0" \
+            -F "description=Enhanced YouTube with uYouEnhanced features" \
+            -F "whatsnew=Latest uYou update for YouTube." \
+            -F "is_public=1" \
+            -F "source_name=Johnny's library" \
+            -F "developer_name=Google LLC" \
+            -F "genre_name=Enhanced Apps" \
+            -F "min_ios_version=15.0" \
+            -F "min_ipados_version=15.0" \
+            --fail
+          echo "Metadata updated successfully!"
+
+      - name: Cleanup Old Versions
+        if: ${{ inputs.upload_to_appdb && inputs.cleanup_old_versions }}
+        env:
+          APPDB_LINK_TOKEN: ${{ secrets.APPDB_LINK_TOKEN }}
+          NEWEST_IPA_ID: ${{ steps.upload_step.outputs.ipa_id }}
+        run: |
+          echo "Step 5: Cleaning up old IPA versions, keeping ID ${NEWEST_IPA_ID}..."
+          IPAS_RESPONSE=$(curl -sS -X POST https://api.dbservices.to/v1.7/get_ipas/ -F "lt=${APPDB_LINK_TOKEN}")
+          OLD_IPA_IDS=$(echo "$IPAS_RESPONSE" | jq -r --argjson newest_id "$NEWEST_IPA_ID" '(.data | map(select(.name | contains("YouTube"))) | map(select(.name | contains("uYou"))) | map(select(.id != $newest_id)) | .[].id)')
+          if [ -z "$OLD_IPA_IDS" ]; then
+            echo "No old uYouEnhanced versions found to delete."
+          else
+            echo "Found old IPAs to delete with IDs: $OLD_IPA_IDS"
+            for OLD_ID in $OLD_IPA_IDS; do
+              echo "Deleting IPA with ID: $OLD_ID..."
+              curl -sS -X POST https://api.dbservices.to/v1.7/delete_ipa/ \
+                -F "lt=${APPDB_LINK_TOKEN}" \
+                -F "id=${OLD_ID}" \
+                --fail
+              echo "Deleted IPA with ID: $OLD_ID"
+              sleep 2
+            done
+          fi
+          echo "Cleanup finished."
 
       - name: Create Release
         if: ${{ inputs.create_release }}
-        id: create_release
-        uses: softprops/action-gh-release@v2.2.1
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UYOU_VERSION: ${{ inputs.uyou_version }}
-          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
         with:
-          tag_name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
-          name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
+          tag_name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
+          name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
           files: main/packages/*.ipa
           draft: true
