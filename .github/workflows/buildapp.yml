@@ -15,7 +15,7 @@ on:
         type: string
       decrypted_youtube_url:
         description: "Direct URL of the decrypted YouTube IPA"
-        default: "https://www.dropbox.com/scl/fi/49svm4r7eymn2nfxcggm1/com.google.ios.youtube_20.25.4_und3fined.ipa?rlkey=d8may76sn78wuazj55uj8e0nc&st=2hpnngd9&dl=1"
+        default: "https://www.dropbox.com/scl/fi/htoeykcdavw625pglqff7/com.google.ios.youtube_20.28.2_und3fined.ipa?rlkey=ctci5cf1aq1aqhn5yela1h8cc&st=in9042ma&dl=1"
         required: true
         type: string
       bundle_id:
@@ -33,14 +33,9 @@ on:
         default: ""
         required: false
         type: string
-      upload_artifact:
-        description: "Upload IPA as artifact"
-        default: false
-        required: false
-        type: boolean
       create_release:
-        description: "Create a draft release"
-        default: false
+        description: "Create a public GitHub release"
+        default: true
         required: false
         type: boolean
       upload_to_appdb:
@@ -77,7 +72,7 @@ jobs:
         run: brew install ldid dpkg make jq
 
       - name: Set PATH environment variable
-        run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH 
+        run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
 
       - name: Setup Theos
         uses: actions/checkout@v4
@@ -122,54 +117,56 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Mask YT ipa url
+      - name: Download YouTube IPA
         run: |
-          URL_YT="$(jq -r '.inputs.decrypted_youtube_url' $GITHUB_EVENT_PATH)"
-          echo ::add-mask::$URL_YT
-          echo "URL_YT=$URL_YT" >> $GITHUB_ENV
+          echo "::add-mask::${{ inputs.decrypted_youtube_url }}"
+          wget -O ${{ github.workspace }}/main/YouTube.ipa "${{ inputs.decrypted_youtube_url }}" --no-verbose
+          
+      - name: Validate Downloaded IPA
+        run: |
+          file_path="${{ github.workspace }}/main/YouTube.ipa"
+          if [ ! -f "$file_path" ]; then
+            echo "::error::Download failed: IPA file not found at $file_path"
+            exit 1
+          fi
+          file_type=$(file --mime-type -b "$file_path")
+          echo "Detected file type for downloaded file: $file_type"
+          if [[ "$file_type" != "application/x-ios-app" && "$file_type" != "application/zip" ]]; then
+            echo "::error::Validation failed: The downloaded file is not a valid IPA file. Detected type: $file_type."
+            exit 1
+          fi
+          echo "Downloaded IPA is valid."
 
-      - name: Prepare YouTube iPA
+      - name: Prepare YouTube App
         id: prepare_youtube
         run: |
-          wget "$YOUTUBE_URL" --quiet --no-verbose -O main/YouTube.ipa
           cd ${{ github.workspace }}/main
           mv YouTube.ipa YouTube.zip
           unzip -q YouTube.zip
           youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
-          echo "==> YouTube v$youtube_version downloaded!"
+          echo "==> YouTube v$youtube_version prepared!"
           sed -i '' "17s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
           echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
         env:
           THEOS: ${{ github.workspace }}/theos
-          YOUTUBE_URL: ${{ env.URL_YT }}
 
       - name: Fix compiling & Build Package
         id: build_package
         run: |
           cd ${{ github.workspace }}/main
-          sed -i '' "30s#.*#BUNDLE_ID = ${{ env.BUNDLE_ID }}#g" Makefile
-          sed -i '' "29s#.*#DISPLAY_NAME = ${{ env.APP_NAME }}#g" Makefile
+          sed -i '' "30s#.*#BUNDLE_ID = ${{ inputs.bundle_id }}#g" Makefile
+          sed -i '' "29s#.*#DISPLAY_NAME = ${{ inputs.app_name }}#g" Makefile
           sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
           
           PACKAGE_NAME=$(ls -t packages | head -n1)
           echo "package_name=${PACKAGE_NAME}" >> $GITHUB_OUTPUT
-          echo "job_id=$(echo -n "${{ github.run_id }}-${{ github.run_attempt }}" | shasum -a 1 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "job_id=$(echo -n "${{ github.run_id }}-${{ github.run_attempt }}" | shasum -a 1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
-          echo -e "==> \033[1mBundle ID: ${{ env.BUNDLE_ID }}\033[0m"
+          echo -e "==> \033[1mBundle ID: ${{ inputs.bundle_id }}\033[0m"
         env:
           THEOS: ${{ github.workspace }}/theos
           UYOU_VERSION: ${{ inputs.uyou_version }}
-          BUNDLE_ID: ${{ inputs.bundle_id }}
-          APP_NAME: ${{ inputs.app_name }}
-
-      - name: Upload Artifact
-        if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: uYouEnhanced_${{ steps.prepare_youtube.outputs.youtube_version }}_${{ inputs.uyou_version }}
-          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package_name }}
-          if-no-files-found: error
 
       - name: Upload and Edit on appdb
         if: ${{ inputs.upload_to_appdb }}
@@ -250,9 +247,9 @@ jobs:
             for OLD_ID in $OLD_IPA_IDS; do
               echo "Deleting IPA with ID: $OLD_ID..."
               curl -sS -X POST https://api.dbservices.to/v1.7/delete_ipa/ \
-                -F "lt=${APPDB_LINK_TOKEN}" \
-                -F "id=${OLD_ID}" \
-                --fail
+                   -F "lt=${APPDB_LINK_TOKEN}" \
+                   -F "id=${OLD_ID}" \
+                   --fail
               echo "Deleted IPA with ID: $OLD_ID"
               sleep 2
             done
@@ -268,4 +265,4 @@ jobs:
           tag_name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
           name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
           files: main/packages/*.ipa
-          draft: true
+          draft: false
